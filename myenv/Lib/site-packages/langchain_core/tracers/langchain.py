@@ -1,14 +1,14 @@
-"""A Tracer implementation that records to LangChain endpoint."""
+"""A tracer implementation that records to LangChain endpoint."""
 
 from __future__ import annotations
 
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Optional, Union
+from typing import TYPE_CHECKING, Any, cast
 from uuid import UUID
 
-from langsmith import Client
+from langsmith import Client, get_tracing_context
 from langsmith import run_trees as rt
 from langsmith import utils as ls_utils
 from tenacity import (
@@ -21,16 +21,36 @@ from typing_extensions import override
 
 from langchain_core.env import get_runtime_environment
 from langchain_core.load import dumpd
+from langchain_core.messages.ai import UsageMetadata, add_usage
+from langchain_core.tracers._compat import run_construct, run_to_dict
 from langchain_core.tracers.base import BaseTracer
 from langchain_core.tracers.schemas import Run
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from langchain_core.messages import BaseMessage
     from langchain_core.outputs import ChatGenerationChunk, GenerationChunk
 
 logger = logging.getLogger(__name__)
-_LOGGED = set()
-_EXECUTOR: Optional[ThreadPoolExecutor] = None
+_LOGGED: set[tuple[str, type[Exception]]] = set()
+_EXECUTOR: ThreadPoolExecutor | None = None
+
+OVERRIDABLE_LANGSMITH_INHERITABLE_METADATA_KEYS: frozenset[str] = frozenset(
+    {"ls_agent_type"}
+)
+"""Allowlist of LangSmith-only tracing metadata keys that bypass the default
+"first wins" merge semantics used when propagating tracer metadata to nested
+runs.
+
+Keys in this set are ALWAYS overridden by the nearest enclosing tracer config,
+so nested callers (e.g. a subagent) can replace a value inherited from an
+ancestor.
+
+Keep this list very small: every key here loses the default "first wins"
+protection and is always clobbered by the nearest enclosing tracer config.
+Only keys that are strictly for LangSmith tracing bookkeeping should be added.
+"""
 
 
 def log_error_once(method: str, exception: Exception) -> None:
@@ -53,7 +73,11 @@ def wait_for_all_tracers() -> None:
 
 
 def get_client() -> Client:
-    """Get the client."""
+    """Get the client.
+
+    Returns:
+        The LangSmith client.
+    """
     return rt.get_cached_client()
 
 
@@ -65,27 +89,80 @@ def _get_executor() -> ThreadPoolExecutor:
     return _EXECUTOR
 
 
+def _get_usage_metadata_from_generations(
+    generations: list[list[dict[str, Any]]],
+) -> UsageMetadata | None:
+    """Extract and aggregate `usage_metadata` from generations.
+
+    Iterates through generations to find and aggregate all `usage_metadata` found in
+    messages. This expects the serialized message payload shape produced by tracer
+    internals:
+
+        `{"message": {"kwargs": {"usage_metadata": {...}}}}`
+
+    Args:
+        generations: List of generation batches, where each batch is a list of
+            generation dicts that may contain a `'message'` key with
+            usage metadata.
+
+    Returns:
+        The aggregated `usage_metadata` dict if found, otherwise `None`.
+    """
+    output: UsageMetadata | None = None
+    for generation_batch in generations:
+        for generation in generation_batch:
+            if isinstance(generation, dict) and "message" in generation:
+                message = generation["message"]
+                usage_metadata = _get_usage_metadata_from_message(message)
+                if usage_metadata is not None:
+                    output = add_usage(output, usage_metadata)
+    return output
+
+
+def _get_usage_metadata_from_message(message: Any) -> UsageMetadata | None:
+    """Extract usage metadata from a generation's message payload."""
+    if not isinstance(message, dict):
+        return None
+
+    kwargs = message.get("kwargs")
+    if isinstance(kwargs, dict) and isinstance(kwargs.get("usage_metadata"), dict):
+        return cast("UsageMetadata", kwargs["usage_metadata"])
+
+    return None
+
+
 class LangChainTracer(BaseTracer):
-    """Implementation of the SharedTracer that POSTS to the LangChain endpoint."""
+    """Implementation of the `SharedTracer` that `POSTS` to the LangChain endpoint."""
 
     run_inline = True
 
     def __init__(
         self,
-        example_id: Optional[Union[UUID, str]] = None,
-        project_name: Optional[str] = None,
-        client: Optional[Client] = None,
-        tags: Optional[list[str]] = None,
+        example_id: UUID | str | None = None,
+        project_name: str | None = None,
+        client: Client | None = None,
+        tags: list[str] | None = None,
+        *,
+        metadata: Mapping[str, str] | None = None,
         **kwargs: Any,
     ) -> None:
         """Initialize the LangChain tracer.
 
         Args:
             example_id: The example ID.
-            project_name: The project name. Defaults to the tracer project.
-            client: The client. Defaults to the global client.
-            tags: The tags. Defaults to an empty list.
-            kwargs: Additional keyword arguments.
+            project_name: The project name.
+
+                Defaults to the tracer project.
+            client: The client.
+
+                Defaults to the global client.
+            tags: The tags.
+
+                Defaults to an empty list.
+            metadata: Additional metadata to include if it isn't already in the run.
+
+                Defaults to None.
+            **kwargs: Additional keyword arguments.
         """
         super().__init__(**kwargs)
         self.example_id = (
@@ -94,8 +171,51 @@ class LangChainTracer(BaseTracer):
         self.project_name = project_name or ls_utils.get_tracer_project()
         self.client = client or get_client()
         self.tags = tags or []
-        self.latest_run: Optional[Run] = None
+        self.latest_run: Run | None = None
         self.run_has_token_event_map: dict[str, bool] = {}
+        self.tracing_metadata: dict[str, str] | None = (
+            dict(metadata) if metadata is not None else None
+        )
+
+    def copy_with_metadata_defaults(
+        self,
+        *,
+        metadata: Mapping[str, str] | None = None,
+        tags: list[str] | None = None,
+    ) -> LangChainTracer:
+        """Return a new tracer with merged tracer-only defaults."""
+        base_metadata = self.tracing_metadata
+        if metadata is None:
+            merged_metadata = dict(base_metadata) if base_metadata is not None else None
+        elif base_metadata is None:
+            merged_metadata = dict(metadata)
+        else:
+            merged_metadata = dict(base_metadata)
+            for key, value in metadata.items():
+                # For allowlisted LangSmith-only inheritable metadata keys
+                # (e.g. `ls_agent_type`), nested callers are allowed to
+                # OVERRIDE the value inherited from an ancestor. For all
+                # other keys we keep the existing "first wins" behavior so
+                # that ancestor-provided tracing metadata is not accidentally
+                # clobbered by child runs.
+                if (
+                    key not in merged_metadata
+                    or key in OVERRIDABLE_LANGSMITH_INHERITABLE_METADATA_KEYS
+                ):
+                    merged_metadata[key] = value
+
+        merged_tags = sorted(set(self.tags + tags)) if tags else self.tags
+
+        return self.__class__(
+            example_id=self.example_id,
+            project_name=self.project_name,
+            client=self.client,
+            tags=merged_tags,
+            metadata=merged_metadata,
+            run_map=self.run_map,
+            order_map=self.order_map,
+            _external_run_ids=self._external_run_ids,
+        )
 
     def _start_trace(self, run: Run) -> None:
         if self.project_name:
@@ -109,6 +229,8 @@ class LangChainTracer(BaseTracer):
         super()._start_trace(run)
         if run.ls_client is None:
             run.ls_client = self.client
+        if get_tracing_context().get("enabled") is False:
+            run.extra["__disabled"] = True
 
     def on_chat_model_start(
         self,
@@ -116,10 +238,10 @@ class LangChainTracer(BaseTracer):
         messages: list[list[BaseMessage]],
         *,
         run_id: UUID,
-        tags: Optional[list[str]] = None,
-        parent_run_id: Optional[UUID] = None,
-        metadata: Optional[dict[str, Any]] = None,
-        name: Optional[str] = None,
+        tags: list[str] | None = None,
+        parent_run_id: UUID | None = None,
+        metadata: dict[str, Any] | None = None,
+        name: str | None = None,
         **kwargs: Any,
     ) -> Run:
         """Start a trace for an LLM run.
@@ -128,14 +250,14 @@ class LangChainTracer(BaseTracer):
             serialized: The serialized model.
             messages: The messages.
             run_id: The run ID.
-            tags: The tags. Defaults to None.
-            parent_run_id: The parent run ID. Defaults to None.
-            metadata: The metadata. Defaults to None.
-            name: The name. Defaults to None.
-            kwargs: Additional keyword arguments.
+            tags: The tags.
+            parent_run_id: The parent run ID.
+            metadata: The metadata.
+            name: The name.
+            **kwargs: Additional keyword arguments.
 
         Returns:
-            Run: The run.
+            The run.
         """
         start_time = datetime.now(timezone.utc)
         if metadata:
@@ -150,7 +272,7 @@ class LangChainTracer(BaseTracer):
             start_time=start_time,
             run_type="llm",
             tags=tags,
-            name=name,  # type: ignore[arg-type]
+            name=name,
         )
         self._start_trace(chat_model_run)
         self._on_chat_model_start(chat_model_run)
@@ -159,8 +281,9 @@ class LangChainTracer(BaseTracer):
     def _persist_run(self, run: Run) -> None:
         # We want to free up more memory by avoiding keeping a reference to the
         # whole nested run tree.
-        self.latest_run = Run.construct(
-            **run.dict(exclude={"child_runs", "inputs", "outputs"}),
+        run_data = run_to_dict(run, exclude={"child_runs", "inputs", "outputs"})
+        self.latest_run = run_construct(
+            **run_data,
             inputs=run.inputs,
             outputs=run.outputs,
         )
@@ -169,7 +292,7 @@ class LangChainTracer(BaseTracer):
         """Get the LangSmith root run URL.
 
         Returns:
-            str: The LangSmith root run URL.
+            The LangSmith root run URL.
 
         Raises:
             ValueError: If no traced run is found.
@@ -187,8 +310,11 @@ class LangChainTracer(BaseTracer):
             retry=retry_if_exception_type(ls_utils.LangSmithError),
         ):
             with attempt:
-                return self.client.get_run_url(
-                    run=self.latest_run, project_name=self.project_name
+                return cast(
+                    "str",
+                    self.client.get_run_url(
+                        run=self.latest_run, project_name=self.project_name
+                    ),
                 )
         msg = "Failed to get run URL."
         raise ValueError(msg)
@@ -201,9 +327,12 @@ class LangChainTracer(BaseTracer):
 
     def _persist_run_single(self, run: Run) -> None:
         """Persist a run."""
+        if run.extra.get("__disabled"):
+            return
         try:
             run.extra["runtime"] = get_runtime_environment()
             run.tags = self._get_tags(run)
+            _patch_missing_metadata(self, run)
             if run.ls_client is not self.client:
                 run.ls_client = self.client
             run.post()
@@ -212,8 +341,11 @@ class LangChainTracer(BaseTracer):
             log_error_once("post", e)
             raise
 
-    def _update_run_single(self, run: Run) -> None:
+    @staticmethod
+    def _update_run_single(run: Run) -> None:
         """Update a run."""
+        if run.extra.get("__disabled"):
+            return
         try:
             run.patch(exclude_inputs=run.extra.get("inputs_is_truthy", False))
         except Exception as e:
@@ -230,12 +362,11 @@ class LangChainTracer(BaseTracer):
     @override
     def _llm_run_with_token_event(
         self,
-        token: str,
+        token: str | list[str | dict[str, Any]],
         run_id: UUID,
-        chunk: Optional[Union[GenerationChunk, ChatGenerationChunk]] = None,
-        parent_run_id: Optional[UUID] = None,
+        chunk: GenerationChunk | ChatGenerationChunk | None = None,
+        parent_run_id: UUID | None = None,
     ) -> Run:
-        """Append token event to LLM run and return the run."""
         run_id_str = str(run_id)
         if run_id_str not in self.run_has_token_event_map:
             self.run_has_token_event_map[run_id_str] = True
@@ -250,13 +381,28 @@ class LangChainTracer(BaseTracer):
         )
 
     def _on_chat_model_start(self, run: Run) -> None:
-        """Persist an LLM run."""
+        """Persist a chat model run.
+
+        Note:
+            Naming is historical: there is no `_on_chat_model_end` hook. Chat
+            model completion is handled by `_on_llm_end`, shared with text
+            LLM runs.
+        """
         if run.parent_run_id is None:
             run.reference_example_id = self.example_id
         self._persist_run_single(run)
 
     def _on_llm_end(self, run: Run) -> None:
-        """Process the LLM Run."""
+        """Process LLM/chat model run completion."""
+        # Extract usage_metadata from outputs and store in extra.metadata
+        if run.outputs and "generations" in run.outputs:
+            usage_metadata = _get_usage_metadata_from_generations(
+                run.outputs["generations"]
+            )
+            if usage_metadata is not None:
+                if "metadata" not in run.extra:
+                    run.extra["metadata"] = {}
+                run.extra["metadata"]["usage_metadata"] = usage_metadata
         self._update_run_single(run)
 
     def _on_llm_error(self, run: Run) -> None:
@@ -267,15 +413,28 @@ class LangChainTracer(BaseTracer):
         """Process the Chain Run upon start."""
         if run.parent_run_id is None:
             run.reference_example_id = self.example_id
-        self._persist_run_single(run)
+        # Skip persisting if inputs are deferred (e.g., iterator/generator inputs).
+        # The run will be posted when _on_chain_end is called with realized inputs.
+        if not run.extra.get("defers_inputs"):
+            self._persist_run_single(run)
 
     def _on_chain_end(self, run: Run) -> None:
         """Process the Chain Run."""
-        self._update_run_single(run)
+        # If inputs were deferred, persist (POST) the run now that inputs are realized.
+        # Otherwise, update (PATCH) the existing run.
+        if run.extra.get("defers_inputs"):
+            self._persist_run_single(run)
+        else:
+            self._update_run_single(run)
 
     def _on_chain_error(self, run: Run) -> None:
         """Process the Chain Run upon error."""
-        self._update_run_single(run)
+        # If inputs were deferred, persist (POST) the run now that inputs are realized.
+        # Otherwise, update (PATCH) the existing run.
+        if run.extra.get("defers_inputs"):
+            self._persist_run_single(run)
+        else:
+            self._update_run_single(run)
 
     def _on_tool_start(self, run: Run) -> None:
         """Process the Tool Run upon start."""
@@ -309,3 +468,26 @@ class LangChainTracer(BaseTracer):
         """Wait for the given futures to complete."""
         if self.client is not None:
             self.client.flush()
+
+
+def _patch_missing_metadata(self: LangChainTracer, run: Run) -> None:
+    if not self.tracing_metadata:
+        return
+    metadata = run.metadata
+    patched = None
+    for k, v in self.tracing_metadata.items():
+        # `OVERRIDABLE_LANGSMITH_INHERITABLE_METADATA_KEYS` are a small,
+        # LangSmith-only allowlist that bypasses the "first wins" merge
+        # so a nested caller (e.g. a subagent) can override a parent-set value.
+        if k not in metadata or k in OVERRIDABLE_LANGSMITH_INHERITABLE_METADATA_KEYS:
+            # Skip the copy when the value already matches (avoids cloning
+            # the shared dict in the common "already set" case). Use a
+            # `k in metadata` guard so a legitimate missing key whose
+            # tracer value happens to be `None` is still patched in.
+            if k in metadata and metadata[k] == v:
+                continue
+            if patched is None:
+                # Copy on first miss to avoid mutating the shared dict.
+                patched = {**metadata}
+                run.extra["metadata"] = patched
+            patched[k] = v

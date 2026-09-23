@@ -1,13 +1,14 @@
-"""BasePrompt schema definition."""
+"""`BasePrompt` schema definition."""
 
 from __future__ import annotations
 
 import warnings
-from abc import ABC
+from abc import ABC, abstractmethod
 from string import Formatter
-from typing import Any, Callable, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from pydantic import BaseModel, create_model
+from typing_extensions import override
 
 from langchain_core.prompt_values import PromptValue, StringPromptValue
 from langchain_core.prompts.base import BasePromptTemplate
@@ -15,20 +16,33 @@ from langchain_core.utils import get_colored_text, mustache
 from langchain_core.utils.formatting import formatter
 from langchain_core.utils.interactive_env import is_interactive_env
 
+if TYPE_CHECKING:
+    from collections.abc import Callable, Sequence
+
+try:
+    from jinja2 import meta
+    from jinja2.sandbox import SandboxedEnvironment
+
+    _HAS_JINJA2 = True
+except ImportError:
+    _HAS_JINJA2 = False
+
 PromptTemplateFormat = Literal["f-string", "mustache", "jinja2"]
 
 
 def jinja2_formatter(template: str, /, **kwargs: Any) -> str:
     """Format a template using jinja2.
 
-    *Security warning*:
-        As of LangChain 0.0.329, this method uses Jinja2's
-        SandboxedEnvironment by default. However, this sand-boxing should
-        be treated as a best-effort approach rather than a guarantee of security.
+    !!! warning "Security"
+
+        As of LangChain 0.0.329, this method uses Jinja2's `SandboxedEnvironment` by
+        default. However, this sandboxing should be treated as a best-effort approach
+        rather than a guarantee of security.
+
         Do not accept jinja2 templates from untrusted sources as they may lead
         to arbitrary Python code execution.
 
-        https://jinja.palletsprojects.com/en/3.1.x/sandbox/
+        [More information.](https://jinja.palletsprojects.com/en/3.1.x/sandbox/)
 
     Args:
         template: The template string.
@@ -40,9 +54,7 @@ def jinja2_formatter(template: str, /, **kwargs: Any) -> str:
     Raises:
         ImportError: If jinja2 is not installed.
     """
-    try:
-        from jinja2.sandbox import SandboxedEnvironment
-    except ImportError as e:
+    if not _HAS_JINJA2:
         msg = (
             "jinja2 not installed, which is needed to use the jinja2_formatter. "
             "Please install it with `pip install jinja2`."
@@ -50,15 +62,13 @@ def jinja2_formatter(template: str, /, **kwargs: Any) -> str:
             "Do not expand jinja2 templates using unverified or user-controlled "
             "inputs as that can result in arbitrary Python code execution."
         )
-        raise ImportError(msg) from e
+        raise ImportError(msg)
 
-    # This uses a sandboxed environment to prevent arbitrary code execution.
-    # Jinja2 uses an opt-out rather than opt-in approach for sand-boxing.
-    # Please treat this sand-boxing as a best-effort approach rather than
-    # a guarantee of security.
-    # We recommend to never use jinja2 templates with untrusted inputs.
-    # https://jinja.palletsprojects.com/en/3.1.x/sandbox/
-    # approach not a guarantee of security.
+    # Use Jinja2's SandboxedEnvironment which blocks access to dunder attributes
+    # (e.g., __class__, __globals__) to prevent sandbox escapes.
+    # Note: regular attribute access (e.g., {{obj.attr}}) and method calls are
+    # still allowed. This is a best-effort measure — do not use with untrusted
+    # templates.
     return SandboxedEnvironment().from_string(template).render(**kwargs)
 
 
@@ -88,15 +98,13 @@ def validate_jinja2(template: str, input_variables: list[str]) -> None:
 
 
 def _get_jinja2_variables_from_template(template: str) -> set[str]:
-    try:
-        from jinja2 import Environment, meta
-    except ImportError as e:
+    if not _HAS_JINJA2:
         msg = (
             "jinja2 not installed, which is needed to use the jinja2_formatter. "
             "Please install it with `pip install jinja2`."
         )
-        raise ImportError(msg) from e
-    env = Environment()  # noqa: S701
+        raise ImportError(msg)
+    env = SandboxedEnvironment()
     ast = env.parse(template)
     return meta.find_undeclared_variables(ast)
 
@@ -117,13 +125,16 @@ def mustache_formatter(template: str, /, **kwargs: Any) -> str:
 def mustache_template_vars(
     template: str,
 ) -> set[str]:
-    """Get the variables from a mustache template.
+    """Get the top-level variables from a mustache template.
+
+    For nested variables like `{{person.name}}`, only the top-level key (`person`) is
+    returned.
 
     Args:
         template: The template string.
 
     Returns:
-        The variables from the template.
+        The top-level variables from the template.
     """
     variables: set[str] = set()
     section_depth = 0
@@ -144,9 +155,7 @@ def mustache_template_vars(
 Defs = dict[str, "Defs"]
 
 
-def mustache_schema(
-    template: str,
-) -> type[BaseModel]:
+def mustache_schema(template: str) -> type[BaseModel]:
     """Get the variables from a mustache template.
 
     Args:
@@ -166,10 +175,15 @@ def mustache_schema(
                 prefix = section_stack.pop()
         elif type_ in {"section", "inverted section"}:
             section_stack.append(prefix)
-            prefix = prefix + tuple(key.split("."))
+            prefix += tuple(key.split("."))
             fields[prefix] = False
         elif type_ in {"variable", "no escape"}:
             fields[prefix + tuple(key.split("."))] = True
+
+    for fkey, fval in fields.items():
+        fields[fkey] = fval and not any(
+            is_subsequence(fkey, k) for k in fields if k != fkey
+        )
     defs: Defs = {}  # None means leaf node
     while fields:
         field, is_leaf = fields.popitem()
@@ -180,26 +194,69 @@ def mustache_schema(
     return _create_model_recursive("PromptInput", defs)
 
 
-def _create_model_recursive(name: str, defs: Defs) -> type:
-    return create_model(  # type: ignore[call-overload]
-        name,
-        **{
-            k: (_create_model_recursive(k, v), None) if v else (type(v), None)
-            for k, v in defs.items()
-        },
+def _create_model_recursive(name: str, defs: Defs) -> type[BaseModel]:
+    return cast(
+        "type[BaseModel]",
+        create_model(  # type: ignore[call-overload]
+            name,
+            **{
+                k: (_create_model_recursive(k, v), None) if v else (type(v), None)
+                for k, v in defs.items()
+            },
+        ),
     )
 
 
-DEFAULT_FORMATTER_MAPPING: dict[str, Callable] = {
+DEFAULT_FORMATTER_MAPPING: dict[str, Callable[..., str]] = {
     "f-string": formatter.format,
     "mustache": mustache_formatter,
     "jinja2": jinja2_formatter,
 }
 
-DEFAULT_VALIDATOR_MAPPING: dict[str, Callable] = {
+DEFAULT_VALIDATOR_MAPPING: dict[str, Callable[[str, list[str]], None]] = {
     "f-string": formatter.validate_input_variables,
     "jinja2": validate_jinja2,
 }
+
+
+def _parse_f_string_fields(template: str) -> list[tuple[str, str | None]]:
+    fields: list[tuple[str, str | None]] = []
+    for _, field_name, format_spec, _ in Formatter().parse(template):
+        if field_name is not None:
+            fields.append((field_name, format_spec))
+    return fields
+
+
+def validate_f_string_template(template: str) -> list[str]:
+    """Validate an f-string template and return its input variables."""
+    input_variables = set()
+    for var, format_spec in _parse_f_string_fields(template):
+        if "." in var or "[" in var or "]" in var:
+            msg = (
+                f"Invalid variable name {var!r} in f-string template. "
+                f"Variable names cannot contain attribute "
+                f"access (.) or indexing ([])."
+            )
+            raise ValueError(msg)
+
+        if var.isdigit():
+            msg = (
+                f"Invalid variable name {var!r} in f-string template. "
+                f"Variable names cannot be all digits as they are interpreted "
+                f"as positional arguments."
+            )
+            raise ValueError(msg)
+
+        if format_spec and ("{" in format_spec or "}" in format_spec):
+            msg = (
+                "Invalid format specifier in f-string template. "
+                "Nested replacement fields are not allowed."
+            )
+            raise ValueError(msg)
+
+        input_variables.add(var)
+
+    return sorted(input_variables)
 
 
 def check_valid_template(
@@ -209,7 +266,9 @@ def check_valid_template(
 
     Args:
         template: The template string.
-        template_format: The template format. Should be one of "f-string" or "jinja2".
+        template_format: The template format.
+
+            Should be one of `'f-string'` or `'jinja2'`.
         input_variables: The input variables.
 
     Raises:
@@ -224,6 +283,8 @@ def check_valid_template(
             f" {list(DEFAULT_FORMATTER_MAPPING)}."
         )
         raise ValueError(msg) from exc
+    if template_format == "f-string":
+        validate_f_string_template(template)
     try:
         validator_func(template, input_variables)
     except (KeyError, IndexError) as exc:
@@ -239,7 +300,9 @@ def get_template_variables(template: str, template_format: str) -> list[str]:
 
     Args:
         template: The template string.
-        template_format: The template format. Should be one of "f-string" or "jinja2".
+        template_format: The template format.
+
+            Should be one of `'f-string'`, `'mustache'` or `'jinja2'`.
 
     Returns:
         The variables from the template.
@@ -247,13 +310,12 @@ def get_template_variables(template: str, template_format: str) -> list[str]:
     Raises:
         ValueError: If the template format is not supported.
     """
+    input_variables: list[str] | set[str]
     if template_format == "jinja2":
         # Get the variables for the template
-        input_variables = _get_jinja2_variables_from_template(template)
+        input_variables = sorted(_get_jinja2_variables_from_template(template))
     elif template_format == "f-string":
-        input_variables = {
-            v for _, v, _, _ in Formatter().parse(template) if v is not None
-        }
+        input_variables = validate_f_string_template(template)
     elif template_format == "mustache":
         input_variables = mustache_template_vars(template)
     else:
@@ -263,19 +325,23 @@ def get_template_variables(template: str, template_format: str) -> list[str]:
     return sorted(input_variables)
 
 
-class StringPromptTemplate(BasePromptTemplate, ABC):
+class StringPromptTemplate(BasePromptTemplate[str], ABC):
     """String prompt that exposes the format method, returning a prompt."""
 
     @classmethod
     def get_lc_namespace(cls) -> list[str]:
-        """Get the namespace of the langchain object."""
+        """Get the namespace of the LangChain object.
+
+        Returns:
+            `["langchain", "prompts", "base"]`
+        """
         return ["langchain", "prompts", "base"]
 
     def format_prompt(self, **kwargs: Any) -> PromptValue:
         """Format the prompt with the inputs.
 
         Args:
-            kwargs: Any arguments to be passed to the prompt template.
+            **kwargs: Any arguments to be passed to the prompt template.
 
         Returns:
             A formatted string.
@@ -286,12 +352,16 @@ class StringPromptTemplate(BasePromptTemplate, ABC):
         """Async format the prompt with the inputs.
 
         Args:
-            kwargs: Any arguments to be passed to the prompt template.
+            **kwargs: Any arguments to be passed to the prompt template.
 
         Returns:
             A formatted string.
         """
         return StringPromptValue(text=await self.aformat(**kwargs))
+
+    @override
+    @abstractmethod
+    def format(self, **kwargs: Any) -> str: ...
 
     def pretty_repr(
         self,
@@ -318,3 +388,12 @@ class StringPromptTemplate(BasePromptTemplate, ABC):
     def pretty_print(self) -> None:
         """Print a pretty representation of the prompt."""
         print(self.pretty_repr(html=is_interactive_env()))  # noqa: T201
+
+
+def is_subsequence(child: Sequence[Any], parent: Sequence[Any]) -> bool:
+    """Return `True` if child is subsequence of parent."""
+    if len(child) == 0 or len(parent) == 0:
+        return False
+    if len(parent) < len(child):
+        return False
+    return all(child[i] == parent[i] for i in range(len(child)))

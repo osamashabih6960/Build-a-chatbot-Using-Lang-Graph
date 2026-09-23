@@ -1,255 +1,308 @@
 """Convert functions and runnables to tools."""
 
 import inspect
-from typing import Any, Callable, Literal, Optional, Union, get_type_hints, overload
+from collections.abc import Callable
+from typing import Any, Literal, cast, get_type_hints, overload
 
-from pydantic import BaseModel, Field, create_model
+from pydantic import BaseModel, Field, RootModel, create_model
 
 from langchain_core.callbacks import Callbacks
 from langchain_core.runnables import Runnable
 from langchain_core.tools.base import ArgsSchema, BaseTool
 from langchain_core.tools.simple import Tool
 from langchain_core.tools.structured import StructuredTool
+from langchain_core.utils.pydantic import TypeBaseModel
 
 
 @overload
 def tool(
     *,
-    description: Optional[str] = None,
+    description: str | None = None,
     return_direct: bool = False,
-    args_schema: Optional[ArgsSchema] = None,
+    args_schema: ArgsSchema | None = None,
     infer_schema: bool = True,
     response_format: Literal["content", "content_and_artifact"] = "content",
     parse_docstring: bool = False,
     error_on_invalid_docstring: bool = True,
-) -> Callable[[Union[Callable, Runnable]], BaseTool]: ...
-
-
-@overload
-def tool(
-    name_or_callable: str,
-    runnable: Runnable,
-    *,
-    description: Optional[str] = None,
-    return_direct: bool = False,
-    args_schema: Optional[ArgsSchema] = None,
-    infer_schema: bool = True,
-    response_format: Literal["content", "content_and_artifact"] = "content",
-    parse_docstring: bool = False,
-    error_on_invalid_docstring: bool = True,
-) -> BaseTool: ...
-
-
-@overload
-def tool(
-    name_or_callable: Callable,
-    *,
-    description: Optional[str] = None,
-    return_direct: bool = False,
-    args_schema: Optional[ArgsSchema] = None,
-    infer_schema: bool = True,
-    response_format: Literal["content", "content_and_artifact"] = "content",
-    parse_docstring: bool = False,
-    error_on_invalid_docstring: bool = True,
-) -> BaseTool: ...
+    extras: dict[str, Any] | None = None,
+) -> Callable[[Callable[..., Any] | Runnable[Any, Any]], BaseTool]: ...
 
 
 @overload
 def tool(
     name_or_callable: str,
+    runnable: Runnable[Any, Any],
     *,
-    description: Optional[str] = None,
+    description: str | None = None,
     return_direct: bool = False,
-    args_schema: Optional[ArgsSchema] = None,
+    args_schema: ArgsSchema | None = None,
     infer_schema: bool = True,
     response_format: Literal["content", "content_and_artifact"] = "content",
     parse_docstring: bool = False,
     error_on_invalid_docstring: bool = True,
-) -> Callable[[Union[Callable, Runnable]], BaseTool]: ...
+    extras: dict[str, Any] | None = None,
+) -> BaseTool: ...
+
+
+@overload
+def tool(
+    name_or_callable: Callable[..., Any],
+    *,
+    description: str | None = None,
+    return_direct: bool = False,
+    args_schema: ArgsSchema | None = None,
+    infer_schema: bool = True,
+    response_format: Literal["content", "content_and_artifact"] = "content",
+    parse_docstring: bool = False,
+    error_on_invalid_docstring: bool = True,
+    extras: dict[str, Any] | None = None,
+) -> BaseTool: ...
+
+
+@overload
+def tool(
+    name_or_callable: str,
+    *,
+    description: str | None = None,
+    return_direct: bool = False,
+    args_schema: ArgsSchema | None = None,
+    infer_schema: bool = True,
+    response_format: Literal["content", "content_and_artifact"] = "content",
+    parse_docstring: bool = False,
+    error_on_invalid_docstring: bool = True,
+    extras: dict[str, Any] | None = None,
+) -> Callable[[Callable[..., Any] | Runnable[Any, Any]], BaseTool]: ...
 
 
 def tool(
-    name_or_callable: Optional[Union[str, Callable]] = None,
-    runnable: Optional[Runnable] = None,
+    name_or_callable: str | Callable[..., Any] | None = None,
+    runnable: Runnable[Any, Any] | None = None,
     *args: Any,
-    description: Optional[str] = None,
+    description: str | None = None,
     return_direct: bool = False,
-    args_schema: Optional[ArgsSchema] = None,
+    args_schema: ArgsSchema | None = None,
     infer_schema: bool = True,
     response_format: Literal["content", "content_and_artifact"] = "content",
     parse_docstring: bool = False,
     error_on_invalid_docstring: bool = True,
-) -> Union[
-    BaseTool,
-    Callable[[Union[Callable, Runnable]], BaseTool],
-]:
-    """Make tools out of functions, can be used with or without arguments.
+    extras: dict[str, Any] | None = None,
+) -> BaseTool | Callable[[Callable[..., Any] | Runnable[Any, Any]], BaseTool]:
+    """Convert Python functions and `Runnables` to LangChain tools.
+
+    Can be used as a decorator with or without arguments to create tools from functions.
+
+    Functions can have any signature - the tool will automatically infer input schemas
+    unless disabled.
+
+    !!! note "Requirements"
+
+        - Functions should have type hints for proper schema inference.
+        - Functions may accept multiple arguments and return types are flexible;
+            outputs will be serialized if needed.
+        - When using with `Runnable`, a string name must be provided.
+
+    !!! warning "Reserved argument names"
+
+        Avoid naming tool arguments `config`, `run_manager`, or `callbacks`. These
+        collide with values LangChain injects into tools at call time. A `config`
+        argument is shadowed by the injected `RunnableConfig`, so the tool fails
+        at call time with `TypeError: ... missing 1 required positional argument:
+        'config'`, while `run_manager` and `callbacks` are silently dropped from
+        the generated schema. To access runtime information (state, context, store,
+        config), add a `ToolRuntime` parameter instead.
 
     Args:
-        name_or_callable: Optional name of the tool or the callable to be
-            converted to a tool. Must be provided as a positional argument.
-        runnable: Optional runnable to convert to a tool. Must be provided as a
-            positional argument.
+        name_or_callable: Optional name of the tool or the `Callable` to be
+            converted to a tool.
+
+            Overrides the function's name.
+
+            Must be provided as a positional argument.
+        runnable: Optional `Runnable` to convert to a tool.
+
+            Must be provided as a positional argument.
         description: Optional description for the tool.
+
             Precedence for the tool description value is as follows:
-                - `description` argument
-                    (used even if docstring and/or `args_schema` are provided)
-                - tool function docstring
-                    (used even if `args_schema` is provided)
-                - `args_schema` description
-                    (used only if `description` / docstring are not provided)
-        *args: Extra positional arguments. Must be empty.
-        return_direct: Whether to return directly from the tool rather
-            than continuing the agent loop. Defaults to False.
-        args_schema: optional argument schema for user to specify.
-            Defaults to None.
-        infer_schema: Whether to infer the schema of the arguments from
-            the function's signature. This also makes the resultant tool
-            accept a dictionary input to its `run()` function.
-            Defaults to True.
-        response_format: The tool response format. If "content" then the output of
-            the tool is interpreted as the contents of a ToolMessage. If
-            "content_and_artifact" then the output is expected to be a two-tuple
-            corresponding to the (content, artifact) of a ToolMessage.
-            Defaults to "content".
-        parse_docstring: if ``infer_schema`` and ``parse_docstring``, will attempt to
+
+            - This `description` argument (used even if docstring and/or `args_schema`
+                are provided)
+            - Tool function docstring (used even if `args_schema` is provided)
+            - `args_schema` description (used only if `description` and docstring are
+                not provided)
+        *args: Extra positional arguments.
+
+            Must be empty.
+        return_direct: Whether to return directly from the tool rather than continuing
+            the agent loop.
+        args_schema: Optional argument schema for user to specify.
+        infer_schema: Whether to infer the schema of the arguments from the function's
+            signature.
+
+            This also makes the resultant tool accept a dictionary input to its `run()`
+            function.
+        response_format: The tool response format.
+
+            If `'content'`, then the output of the tool is interpreted as the contents
+            of a `ToolMessage`.
+
+            If `'content_and_artifact'`, then the output is expected to be a two-tuple
+            corresponding to the `(content, artifact)` of a `ToolMessage`.
+        parse_docstring: If `infer_schema` and `parse_docstring`, will attempt to
             parse parameter descriptions from Google Style function docstrings.
-            Defaults to False.
-        error_on_invalid_docstring: if ``parse_docstring`` is provided, configure
-            whether to raise ValueError on invalid Google Style docstrings.
-            Defaults to True.
+        error_on_invalid_docstring: If `parse_docstring` is provided, configure
+            whether to raise `ValueError` on invalid Google Style docstrings.
+        extras: Optional provider-specific extra fields for the tool.
+
+            Used to pass configuration that doesn't fit into standard tool fields.
+            Chat models should process known extras when constructing model payloads.
+
+            !!! example
+
+                For example, Anthropic-specific fields like `cache_control`,
+                `defer_loading`, or `input_examples`.
+
+    Raises:
+        ValueError: If too many positional arguments are provided (e.g. violating the
+            `*args` constraint).
+        ValueError: If a `Runnable` is provided without a string name. When using `tool`
+            with a `Runnable`, a `str` name must be provided as the `name_or_callable`.
+        ValueError: If the first argument is not a string or callable with
+            a `__name__` attribute.
+        ValueError: If the function does not have a docstring and description
+            is not provided and `infer_schema` is `False`.
+        ValueError: If `parse_docstring` is `True` and the function has an invalid
+            Google-style docstring and `error_on_invalid_docstring` is True.
+        ValueError: If a `Runnable` is provided that does not have an object schema.
 
     Returns:
         The tool.
 
-    Requires:
-        - Function must be of type (str) -> str
-        - Function must have a docstring
-
     Examples:
-        .. code-block:: python
+        ```python
+        @tool
+        def search_api(query: str) -> str:
+            # Searches the API for the query.
+            return
 
-            @tool
-            def search_api(query: str) -> str:
-                # Searches the API for the query.
-                return
 
-            @tool("search", return_direct=True)
-            def search_api(query: str) -> str:
-                # Searches the API for the query.
-                return
+        @tool("search", return_direct=True)
+        def search_api(query: str) -> str:
+            # Searches the API for the query.
+            return
 
-            @tool(response_format="content_and_artifact")
-            def search_api(query: str) -> tuple[str, dict]:
-                return "partial json of results", {"full": "object of results"}
 
-    .. versionadded:: 0.2.14
-    Parse Google-style docstrings:
+        @tool(response_format="content_and_artifact")
+        def search_api(query: str) -> tuple[str, dict]:
+            return "partial json of results", {"full": "object of results"}
+        ```
 
-        .. code-block:: python
+        Parse Google-style docstrings:
 
-            @tool(parse_docstring=True)
-            def foo(bar: str, baz: int) -> str:
-                \"\"\"The foo.
+        ```python
+        @tool(parse_docstring=True)
+        def foo(bar: str, baz: int) -> str:
+            \"\"\"The foo.
 
-                Args:
-                    bar: The bar.
-                    baz: The baz.
-                \"\"\"
-                return bar
+            Args:
+                bar: The bar.
+                baz: The baz.
+            \"\"\"
+            return bar
 
-            foo.args_schema.model_json_schema()
+        foo.args_schema.model_json_schema()
+        ```
 
-        .. code-block:: python
-
-            {
-                "title": "foo",
-                "description": "The foo.",
-                "type": "object",
-                "properties": {
-                    "bar": {
-                        "title": "Bar",
-                        "description": "The bar.",
-                        "type": "string"
-                    },
-                    "baz": {
-                        "title": "Baz",
-                        "description": "The baz.",
-                        "type": "integer"
-                    }
+        ```python
+        {
+            "title": "foo",
+            "description": "The foo.",
+            "type": "object",
+            "properties": {
+                "bar": {
+                    "title": "Bar",
+                    "description": "The bar.",
+                    "type": "string",
                 },
-                "required": [
-                    "bar",
-                    "baz"
-                ]
-            }
+                "baz": {
+                    "title": "Baz",
+                    "description": "The baz.",
+                    "type": "integer",
+                },
+            },
+            "required": ["bar", "baz"],
+        }
+        ```
 
-        Note that parsing by default will raise ``ValueError`` if the docstring
-        is considered invalid. A docstring is considered invalid if it contains
-        arguments not in the function signature, or is unable to be parsed into
-        a summary and "Args:" blocks. Examples below:
+        Note that parsing by default will raise `ValueError` if the docstring is
+        considered invalid. A docstring is considered invalid if it contains arguments
+        not in the function signature, or is unable to be parsed into a summary and
+        `'Args:'` blocks. Examples below:
 
-        .. code-block:: python
+        ```python
+        # No args section
+        def invalid_docstring_1(bar: str, baz: int) -> str:
+            \"\"\"The foo.\"\"\"
+            return bar
 
-            # No args section
-            def invalid_docstring_1(bar: str, baz: int) -> str:
-                \"\"\"The foo.\"\"\"
-                return bar
+        # Improper whitespace between summary and args section
+        def invalid_docstring_2(bar: str, baz: int) -> str:
+            \"\"\"The foo.
+            Args:
+                bar: The bar.
+                baz: The baz.
+            \"\"\"
+            return bar
 
-            # Improper whitespace between summary and args section
-            def invalid_docstring_2(bar: str, baz: int) -> str:
-                \"\"\"The foo.
-                Args:
-                    bar: The bar.
-                    baz: The baz.
-                \"\"\"
-                return bar
+        # Documented args absent from function signature
+        def invalid_docstring_3(bar: str, baz: int) -> str:
+            \"\"\"The foo.
 
-            # Documented args absent from function signature
-            def invalid_docstring_3(bar: str, baz: int) -> str:
-                \"\"\"The foo.
+            Args:
+                banana: The bar.
+                monkey: The baz.
+            \"\"\"
+            return bar
 
-                Args:
-                    banana: The bar.
-                    monkey: The baz.
-                \"\"\"
-                return bar
-    """  # noqa: D214, D410, D411
+        ```
+    """  # noqa: D214, D410, D411  # We're intentionally showing bad formatting in examples
 
     def _create_tool_factory(
         tool_name: str,
-    ) -> Callable[[Union[Callable, Runnable]], BaseTool]:
+    ) -> Callable[[Callable[..., Any] | Runnable[Any, Any]], BaseTool]:
         """Create a decorator that takes a callable and returns a tool.
 
         Args:
             tool_name: The name that will be assigned to the tool.
 
         Returns:
-            A function that takes a callable or Runnable and returns a tool.
+            A function that takes a callable or `Runnable` and returns a tool.
         """
 
-        def _tool_factory(dec_func: Union[Callable, Runnable]) -> BaseTool:
+        def _tool_factory(
+            dec_func: Callable[..., Any] | Runnable[Any, Any],
+        ) -> BaseTool:
             tool_description = description
             if isinstance(dec_func, Runnable):
                 runnable = dec_func
 
-                if runnable.input_schema.model_json_schema().get("type") != "object":
+                if runnable.get_input_jsonschema().get("type") != "object":
                     msg = "Runnable must have an object schema."
                     raise ValueError(msg)
 
                 async def ainvoke_wrapper(
-                    callbacks: Optional[Callbacks] = None, **kwargs: Any
+                    callbacks: Callbacks | None = None, **kwargs: Any
                 ) -> Any:
                     return await runnable.ainvoke(kwargs, {"callbacks": callbacks})
 
                 def invoke_wrapper(
-                    callbacks: Optional[Callbacks] = None, **kwargs: Any
+                    callbacks: Callbacks | None = None, **kwargs: Any
                 ) -> Any:
                     return runnable.invoke(kwargs, {"callbacks": callbacks})
 
                 coroutine = ainvoke_wrapper
                 func = invoke_wrapper
-                schema: Optional[ArgsSchema] = runnable.input_schema
+                schema: ArgsSchema | None = runnable.input_schema
                 tool_description = description or repr(runnable)
             elif inspect.iscoroutinefunction(dec_func):
                 coroutine = dec_func
@@ -272,22 +325,25 @@ def tool(
                     response_format=response_format,
                     parse_docstring=parse_docstring,
                     error_on_invalid_docstring=error_on_invalid_docstring,
+                    extras=extras,
                 )
             # If someone doesn't want a schema applied, we must treat it as
             # a simple string->string function
-            if dec_func.__doc__ is None:
+            tool_description = tool_description or dec_func.__doc__
+            if tool_description is None:
                 msg = (
-                    "Function must have a docstring if "
-                    "description not provided and infer_schema is False."
+                    "Function must have either a docstring or description "
+                    "when infer_schema is False."
                 )
                 raise ValueError(msg)
             return Tool(
                 name=tool_name,
                 func=func,
-                description=f"{tool_name} tool",
+                description=tool_description,
                 return_direct=return_direct,
                 coroutine=coroutine,
                 response_format=response_format,
+                extras=extras,
             )
 
         return _tool_factory
@@ -302,7 +358,7 @@ def tool(
 
     if runnable is not None:
         # tool is used as a function
-        # tool_from_runnable = tool("name", runnable)
+        # for instance tool_from_runnable = tool("name", runnable)
         if not name_or_callable:
             msg = "Runnable without name for tool constructor"
             raise ValueError(msg)
@@ -339,8 +395,8 @@ def tool(
     # @tool(parse_docstring=True)
     # def my_tool():
     #    pass
-    def _partial(func: Union[Callable, Runnable]) -> BaseTool:
-        """Partial function that takes a callable and returns a tool."""
+    def _partial(func: Callable[..., Any] | Runnable[Any, Any]) -> BaseTool:
+        """Partial function that takes a `Callable` and returns a tool."""
         name_ = func.get_name() if isinstance(func, Runnable) else func.__name__
         tool_factory = _create_tool_factory(name_)
         return tool_factory(func)
@@ -348,18 +404,18 @@ def tool(
     return _partial
 
 
-def _get_description_from_runnable(runnable: Runnable) -> str:
-    """Generate a placeholder description of a runnable."""
-    input_schema = runnable.input_schema.model_json_schema()
+def _get_description_from_runnable(runnable: Runnable[Any, Any]) -> str:
+    """Generate a placeholder description of a `Runnable`."""
+    input_schema = runnable.get_input_jsonschema()
     return f"Takes {input_schema}."
 
 
 def _get_schema_from_runnable_and_arg_types(
-    runnable: Runnable,
+    runnable: Runnable[Any, Any],
     name: str,
-    arg_types: Optional[dict[str, type]] = None,
+    arg_types: dict[str, type] | None = None,
 ) -> type[BaseModel]:
-    """Infer args_schema for tool."""
+    """Infer `args_schema` for tool."""
     if arg_types is None:
         try:
             arg_types = get_type_hints(runnable.InputType)
@@ -371,25 +427,25 @@ def _get_schema_from_runnable_and_arg_types(
             )
             raise TypeError(msg) from e
     fields = {key: (key_type, Field(...)) for key, key_type in arg_types.items()}
-    return create_model(name, **fields)  # type: ignore[call-overload]
+    return cast("type[BaseModel]", create_model(name, **fields))  # type: ignore[call-overload]
 
 
 def convert_runnable_to_tool(
-    runnable: Runnable,
-    args_schema: Optional[type[BaseModel]] = None,
+    runnable: Runnable[Any, Any],
+    args_schema: TypeBaseModel | None = None,
     *,
-    name: Optional[str] = None,
-    description: Optional[str] = None,
-    arg_types: Optional[dict[str, type]] = None,
+    name: str | None = None,
+    description: str | None = None,
+    arg_types: dict[str, type] | None = None,
 ) -> BaseTool:
-    """Convert a Runnable into a BaseTool.
+    """Convert a `Runnable` into a `BaseTool`.
 
     Args:
-        runnable: The runnable to convert.
-        args_schema: The schema for the tool's input arguments. Defaults to None.
-        name: The name of the tool. Defaults to None.
-        description: The description of the tool. Defaults to None.
-        arg_types: The types of the arguments. Defaults to None.
+        runnable: The `Runnable` to convert.
+        args_schema: The schema for the tool's input arguments.
+        name: The name of the tool.
+        description: The description of the tool.
+        arg_types: The types of the arguments.
 
     Returns:
         The tool.
@@ -399,7 +455,7 @@ def convert_runnable_to_tool(
     description = description or _get_description_from_runnable(runnable)
     name = name or runnable.get_name()
 
-    schema = runnable.input_schema.model_json_schema()
+    schema = runnable.get_input_jsonschema()
     if schema.get("type") == "string":
         return Tool(
             name=name,
@@ -408,20 +464,25 @@ def convert_runnable_to_tool(
             description=description,
         )
 
-    async def ainvoke_wrapper(
-        callbacks: Optional[Callbacks] = None, **kwargs: Any
-    ) -> Any:
+    async def ainvoke_wrapper(callbacks: Callbacks | None = None, **kwargs: Any) -> Any:
         return await runnable.ainvoke(kwargs, config={"callbacks": callbacks})
 
-    def invoke_wrapper(callbacks: Optional[Callbacks] = None, **kwargs: Any) -> Any:
+    def invoke_wrapper(callbacks: Callbacks | None = None, **kwargs: Any) -> Any:
         return runnable.invoke(kwargs, config={"callbacks": callbacks})
 
+    input_schema_cls = runnable.input_schema
+    # Detect `RootModel` input schemas so we don't use them directly as the tool
+    # args schema.
+    is_root_model = isinstance(input_schema_cls, type) and issubclass(
+        input_schema_cls, RootModel
+    )
     if (
         arg_types is None
         and schema.get("type") == "object"
         and schema.get("properties")
+        and not is_root_model
     ):
-        args_schema = runnable.input_schema
+        args_schema = input_schema_cls
     else:
         args_schema = _get_schema_from_runnable_and_arg_types(
             runnable, name, arg_types=arg_types
