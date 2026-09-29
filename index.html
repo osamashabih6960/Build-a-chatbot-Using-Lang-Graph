@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LangGraph Chat</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@400;600;800&family=Newsreader:ital@1&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#0b0a1c;--ink:#ece9ff;--dim:#9a96c4;--teal:#5eead4;--pink:#f472b6;--glass:linear-gradient(160deg,rgba(44,40,96,.55),rgba(14,12,36,.62));--edge:rgba(160,150,255,.22)}
+*{box-sizing:border-box;margin:0}
+html,body{height:100%;background:var(--bg);color:var(--ink);font-family:'Bricolage Grotesque',system-ui,sans-serif;overflow:hidden}
+#scene{position:fixed;inset:0;z-index:0}
+.app{position:relative;z-index:1;height:100%;display:grid;grid-template-columns:270px 1fr;gap:16px;padding:16px}
+.panel{background:var(--glass);border:1px solid var(--edge);border-radius:22px;backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);box-shadow:0 20px 60px rgba(0,0,0,.45)}
+aside{display:flex;flex-direction:column;padding:20px;min-height:0}
+h1{font-size:22px;font-weight:800;letter-spacing:-.02em}
+h1 em{font-family:'Newsreader',serif;font-weight:400;color:var(--teal)}
+.new{margin:18px 0;padding:12px;border-radius:14px;border:0;font-family:inherit;font-size:14px;font-weight:600;color:#0b0a1c;background:linear-gradient(120deg,var(--teal),var(--pink));cursor:pointer;transition:transform .15s}
+.new:hover{transform:translateY(-2px)}
+#threads{overflow:auto;display:flex;flex-direction:column;gap:6px;flex:1}
+.t{padding:10px 12px;border-radius:12px;color:var(--dim);font-size:14px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border:1px solid transparent}
+.t:hover{background:rgba(255,255,255,.06);color:var(--ink)}
+.t.on{border-color:var(--edge);color:var(--ink);background:rgba(94,234,212,.08)}
+.empty{color:var(--dim);font-size:13px}
+main{display:flex;flex-direction:column;min-height:0}
+#log{flex:1;overflow:auto;padding:28px 28px 8px;display:flex;flex-direction:column;gap:14px}
+.hero{margin:auto;text-align:center;max-width:420px}
+.hero h2{font-size:34px;font-weight:800;letter-spacing:-.03em;line-height:1.1}
+.hero p{color:var(--dim);margin-top:10px}
+.m{max-width:78%;padding:12px 16px;border-radius:18px;line-height:1.55;font-size:15px;word-wrap:break-word}
+.m.user{align-self:flex-end;background:linear-gradient(120deg,rgba(94,234,212,.9),rgba(244,114,182,.9));color:#0b0a1c;border-bottom-right-radius:6px;font-weight:600}
+.m.assistant{align-self:flex-start;background:rgba(255,255,255,.07);border:1px solid var(--edge);border-bottom-left-radius:6px}
+.m code{background:rgba(0,0,0,.4);padding:2px 6px;border-radius:6px;font-size:13px}
+.m pre{background:rgba(0,0,0,.45);padding:12px;border-radius:12px;overflow:auto;margin:8px 0}
+form{display:flex;gap:10px;padding:16px}
+textarea{flex:1;padding:15px 18px;border-radius:16px;border:1px solid var(--edge);background:rgba(0,0,0,.3);color:var(--ink);font-family:inherit;font-size:15px;outline:0;resize:none;max-height:140px;line-height:1.4}
+textarea:focus-visible{border-color:var(--teal);box-shadow:0 0 0 3px rgba(94,234,212,.2)}
+button.send{padding:0 24px;border-radius:16px;border:0;font-family:inherit;font-size:15px;font-weight:600;background:var(--teal);color:#0b0a1c;cursor:pointer}
+button:disabled{opacity:.5;cursor:wait}
+button:focus-visible,.t:focus-visible{outline:2px solid var(--pink);outline-offset:2px}
+@media(max-width:800px){.app{grid-template-columns:1fr;grid-template-rows:auto 1fr}aside{padding:12px}#threads{display:none}.new{margin:8px 0 0}.m{max-width:92%}}
+@media(prefers-reduced-motion:reduce){*{transition:none!important}}
+.m.user{white-space:pre-wrap}
+.m>:first-child{margin-top:0}.m>:last-child{margin-bottom:0}
+.m p{margin:.5em 0}.m h1,.m h2,.m h3{margin:.9em 0 .4em;letter-spacing:-.02em;line-height:1.2}.m h1{font-size:1.4em}.m h2{font-size:1.2em}.m h3{font-size:1.05em}
+.m ul,.m ol{padding-left:1.3em;margin:.5em 0}.m li{margin:.2em 0}
+.m table{border-collapse:collapse;margin:.7em 0;display:block;overflow-x:auto;max-width:100%}
+.m th,.m td{padding:8px 12px;border-bottom:1px solid var(--edge);text-align:left}.m th{color:var(--teal);font-weight:600}
+.m blockquote{border-left:3px solid var(--pink);padding-left:12px;color:var(--dim);margin:.6em 0}
+.m a{color:var(--teal)}
+.m.live{box-shadow:0 0 0 1px rgba(94,234,212,.35),0 0 28px rgba(94,234,212,.15)}
+.dots{display:inline-flex;gap:5px;padding:4px 0}.dots i{width:7px;height:7px;border-radius:50%;background:var(--teal);animation:b 1.1s infinite}.dots i:nth-child(2){animation-delay:.15s}.dots i:nth-child(3){animation-delay:.3s}
+@keyframes b{0%,80%,100%{opacity:.25;transform:translateY(0)}40%{opacity:1;transform:translateY(-4px)}}
+.chips{display:flex;flex-wrap:wrap;gap:8px;justify-content:center;margin-top:20px}
+.chip{padding:9px 14px;border-radius:999px;border:1px solid var(--edge);background:rgba(255,255,255,.05);color:var(--ink);font-family:inherit;font-size:14px;cursor:pointer;transition:background .15s,border-color .15s}
+.chip:hover{background:rgba(94,234,212,.12);border-color:var(--teal)}
+.foot{display:flex;align-items:center;gap:8px;color:var(--dim);font-size:12px;padding-top:14px;border-top:1px solid var(--edge)}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--teal);box-shadow:0 0 10px var(--teal)}
+.cp{display:block;margin-top:10px;background:none;border:1px solid var(--edge);color:var(--dim);border-radius:8px;padding:3px 10px;font-family:inherit;font-size:12px;cursor:pointer}
+.cp:hover{color:var(--ink);border-color:var(--teal)}
+@media(prefers-reduced-motion:reduce){.dots i{animation:none}}
+</style>
+</head>
+<body>
+<canvas id="scene"></canvas>
+<div class="app">
+  <aside class="panel">
+    <h1>LangGraph <em>chat</em></h1>
+    <button class="new" id="new">New chat</button>
+    <div id="threads"></div>
+    <div class="foot"><span class="dot"></span>Groq · gpt-oss-20b</div>
+  </aside>
+  <main class="panel">
+    <div id="log"></div>
+    <form id="f"><textarea id="q" rows="1" placeholder="Ask anything…  (Enter to send, Shift+Enter for a new line)" aria-label="Message"></textarea><button class="send" id="s">Send</button></form>
+  </main>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/4.3.0/marked.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.0.6/purify.min.js"></script>
+<script>
+/* ---------- 3D scene: the LangGraph itself (START → chat_node → END) ---------- */
+const cv=document.getElementById('scene');
+const R=new THREE.WebGLRenderer({canvas:cv,antialias:true,alpha:true});
+R.setPixelRatio(Math.min(devicePixelRatio,2));
+const S=new THREE.Scene(); S.fog=new THREE.FogExp2(0x0b0a1c,.045);
+const C=new THREE.PerspectiveCamera(50,1,.1,100); C.position.set(0,0,11);
+S.add(new THREE.AmbientLight(0x8877ff,.6));
+const L1=new THREE.PointLight(0x5eead4,2,40); L1.position.set(-6,4,6); S.add(L1);
+const L2=new THREE.PointLight(0xf472b6,2,40); L2.position.set(6,-4,6); S.add(L2);
+
+function glowTex(c){const k=document.createElement('canvas');k.width=k.height=128;const x=k.getContext('2d'),g=x.createRadialGradient(64,64,0,64,64,64);g.addColorStop(0,c+'cc');g.addColorStop(.4,c+'33');g.addColorStop(1,c+'00');x.fillStyle=g;x.fillRect(0,0,128,128);return new THREE.CanvasTexture(k)}
+function glow(c,sz){const h=new THREE.Sprite(new THREE.SpriteMaterial({map:glowTex(c),blending:THREE.AdditiveBlending,transparent:true,depthWrite:false}));h.scale.setScalar(sz);return h}
+function label(t){const k=document.createElement('canvas');k.width=256;k.height=64;const x=k.getContext('2d');x.font='600 30px sans-serif';x.fillStyle='#cfc9ff';x.textAlign='center';x.fillText(t,128,42);const s=new THREE.Sprite(new THREE.SpriteMaterial({map:new THREE.CanvasTexture(k),transparent:true,opacity:.85,depthWrite:false}));s.scale.set(3,.75,1);return s}
+const pts=[new THREE.Vector3(-5,1.2,-2),new THREE.Vector3(0,-.4,0),new THREE.Vector3(5,1.2,-2)];
+const cols=[0x5eead4,0xa78bfa,0xf472b6], nodes=[];
+pts.forEach((p,i)=>{
+  const g=new THREE.Group(); g.position.copy(p);
+  const core=new THREE.Mesh(new THREE.IcosahedronGeometry(i==1?1.5:.9,1),
+    new THREE.MeshStandardMaterial({color:cols[i],emissive:cols[i],emissiveIntensity:.35,roughness:.15,metalness:.6,flatShading:true}));
+  const cage=new THREE.Mesh(new THREE.IcosahedronGeometry(i==1?2.1:1.4,1),
+    new THREE.MeshBasicMaterial({color:cols[i],wireframe:true,transparent:true,opacity:.28}));
+  g.add(core,cage); g.userData={core,cage};
+  g.add(glow(['#5eead4','#a78bfa','#f472b6'][i],i==1?7:4.5));
+  const lb=label(['START','chat_node','END'][i]); lb.position.y=i==1?-2.7:-1.9; g.add(lb); S.add(g); nodes.push(g);
+});
+const curve=new THREE.CatmullRomCurve3(pts);
+S.add(new THREE.Mesh(new THREE.TubeGeometry(curve,80,.03,8,false),new THREE.MeshBasicMaterial({color:0x8b7cff,transparent:true,opacity:.6})));
+const pulse=new THREE.Mesh(new THREE.SphereGeometry(.18,16,16),new THREE.MeshBasicMaterial({color:0xffffff}));
+S.add(pulse); pulse.add(glow('#ffffff',1.6));
+const rings=[1.2,.5].map((rx,k)=>{const r=new THREE.Mesh(new THREE.TorusGeometry(2.8+k*.5,.02,8,120),new THREE.MeshBasicMaterial({color:k?0xf472b6:0xa78bfa,transparent:true,opacity:.5}));r.rotation.x=rx;nodes[1].add(r);return r});
+const FN=48,fp=new Float32Array(FN*3),flow=new THREE.Points(new THREE.BufferGeometry().setAttribute('position',new THREE.BufferAttribute(fp,3)),new THREE.PointsMaterial({size:.14,color:0xffffff,transparent:true,opacity:.4,blending:THREE.AdditiveBlending,depthWrite:false}));S.add(flow);
+const kick=[0,0,0]; function flash(i){kick[i]=.5}
+const N=700,pos=new Float32Array(N*3);
+for(let i=0;i<N*3;i++)pos[i]=(Math.random()-.5)*40;
+const stars=new THREE.Points(new THREE.BufferGeometry().setAttribute('position',new THREE.BufferAttribute(pos,3)),
+  new THREE.PointsMaterial({size:.05,color:0xb9b0ff,transparent:true,opacity:.7}));
+S.add(stars);
+
+let busy=false,t=0,mx=0,my=0;
+addEventListener('pointermove',e=>{mx=e.clientX/innerWidth-.5;my=e.clientY/innerHeight-.5});
+function resize(){R.setSize(innerWidth,innerHeight);C.aspect=innerWidth/innerHeight;C.updateProjectionMatrix();
+  const s=innerWidth<800?.55:1;S.scale.setScalar(s)}
+addEventListener('resize',resize);resize();
+const still=matchMedia('(prefers-reduced-motion:reduce)').matches;
+(function loop(){
+  requestAnimationFrame(loop); t+=.016;
+  nodes.forEach((g,i)=>{ if(!still){g.userData.core.rotation.y+=.006*(i+1);g.userData.cage.rotation.x-=.003;}
+    g.position.y=pts[i].y+(still?0:Math.sin(t+i*2)*.25);
+    g.userData.core.material.emissiveIntensity=busy&&i==1?.9+Math.sin(t*10)*.4:.35; });
+  // pulse travels START → chat_node → END while a reply is streaming
+  const u=busy?(t*.35)%1:0; pulse.visible=busy; pulse.position.copy(curve.getPoint(u));
+  rings.forEach((r,k)=>{if(!still)r.rotation.z+=(busy?.05:.008)*(k?-1:1)});
+  for(let i=0;i<FN;i++){const p=curve.getPoint((i/FN+t*(busy?.25:.03))%1);fp.set([p.x,p.y,p.z],i*3)}
+  flow.geometry.attributes.position.needsUpdate=true; flow.material.opacity=busy?.95:.35;
+  nodes.forEach((g,i)=>{kick[i]*=.93;g.scale.setScalar(1+kick[i])});
+  stars.rotation.y+=still?0:.0004;
+  C.position.x+=(mx*2-C.position.x)*.03; C.position.y+=(-my*1.5-C.position.y)*.03; C.lookAt(0,0,0);
+  R.render(S,C);
+})();
+
+/* ---------- Chat logic ---------- */
+const $=id=>document.getElementById(id), log=$('log'), q=$('q');
+let tid=null;
+const esc=s=>s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+const md=s=>window.marked?DOMPurify.sanitize(marked.parse(s,{breaks:true})):esc(s);
+function bubble(role,text){const d=document.createElement('div');d.className='m '+role;if(role==='user')d.textContent=text;else d.innerHTML=md(text);log.appendChild(d);log.scrollTop=log.scrollHeight;return d}
+function hero(){log.innerHTML='<div class="hero"><h2>What are we building today?</h2><p>Your message travels the graph you see behind this panel.</p><div class="chips">'+['Explain LangGraph simply','Write a pasta recipe','Debug my Python code','Plan a study schedule'].map(c=>'<button type="button" class="chip">'+c+'</button>').join('')+'</div></div>'}
+async function threads(){
+  const list=await (await fetch('/api/threads')).json(), box=$('threads'); box.innerHTML='';
+  if(!list.length)box.innerHTML='<div class="empty">No conversations yet.</div>';
+  list.reverse().forEach(x=>{const d=document.createElement('div');d.className='t'+(x.id===tid?' on':'');d.tabIndex=0;d.textContent=x.title;
+    d.onclick=d.onkeydown=e=>{if(e.type==='keydown'&&e.key!=='Enter')return;open(x.id)};box.appendChild(d)});
+}
+async function open(id){tid=id;const h=await (await fetch('/api/threads/'+id)).json();log.innerHTML='';h.forEach(m=>bubble(m.role,m.content));threads()}
+async function fresh(){tid=(await (await fetch('/api/new')).json()).id;hero();threads()}
+$('new').onclick=fresh;
+$('f').onsubmit=async e=>{
+  e.preventDefault(); const text=q.value.trim(); if(!text||busy)return;
+  if(!log.querySelector('.m'))log.innerHTML=''; q.value='';q.style.height='auto'; bubble('user',text);
+  const out=bubble('assistant',''); out.innerHTML='<span class="dots"><i></i><i></i><i></i></span>'; out.classList.add('live'); flash(0); let acc=''; busy=true; $('s').disabled=true;
+  try{
+    const r=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({thread_id:tid,message:text})});
+    const rd=r.body.getReader(),dec=new TextDecoder(); let buf='';
+    for(;;){const {value,done}=await rd.read(); if(done)break; buf+=dec.decode(value,{stream:true});
+      const parts=buf.split('\n\n'); buf=parts.pop();
+      for(const p of parts){const j=JSON.parse(p.slice(6)); if(j.token){if(!acc)flash(1);acc+=j.token;out.innerHTML=md(acc);log.scrollTop=log.scrollHeight}}}
+  }catch(err){out.textContent='Could not reach the server. Check that uvicorn is running and GROQ_API_KEY is set.'}
+  busy=false; $('s').disabled=false; out.classList.remove('live'); q.focus(); threads();
+  if(acc){flash(2);const cb=document.createElement('button');cb.className='cp';cb.textContent='Copy';cb.onclick=()=>{navigator.clipboard.writeText(acc);cb.textContent='Copied'};out.appendChild(cb)}
+};
+q.addEventListener('input',()=>{q.style.height='auto';q.style.height=Math.min(q.scrollHeight,140)+'px'});
+q.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();$('f').requestSubmit()}});
+log.addEventListener('click',e=>{const c=e.target.closest('.chip');if(c){q.value=c.textContent;$('f').requestSubmit()}});
+fresh();
+</script>
+</body>
+</html>
