@@ -1,98 +1,203 @@
-# LangGraph Chatbot with a 3D Interface
+<div align="center">
 
-A chatbot built with **LangGraph**, powered by **Groq** (`openai/gpt-oss-20b`), with conversation memory stored in **SQLite**. It has two front ends:
+# 🧠 LangGraph Chatbot
 
-- **3D web UI** (new): a glass chat panel over a live Three.js scene of the graph itself. While a reply streams, a light pulse travels `START → chat_node → END`.
-- **Streamlit apps**: the original step-by-step versions.
+### A memory-powered AI chatbot with a 3D interface
 
-## Screenshots
+Built with **LangGraph** · **Groq** · **SQLite** · **Streamlit** · **FastAPI** · **Three.js**
 
-Streamlit version (`streamlit_frontend_database.py`) running locally on port 8501. Past conversations load from SQLite in the sidebar.
+![Python](https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white)
+![LangGraph](https://img.shields.io/badge/LangGraph-Stateful%20Agents-6E56CF)
+![Groq](https://img.shields.io/badge/LLM-Groq-F55036)
+![Streamlit](https://img.shields.io/badge/Streamlit-UI-FF4B4B?logo=streamlit&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-Backend-009688?logo=fastapi&logoColor=white)
+![Three.js](https://img.shields.io/badge/Three.js-3D-000000?logo=threedotjs&logoColor=white)
+![License](https://img.shields.io/badge/License-MIT-green)
 
-**Home: conversation list and empty chat**
+[Features](#-features) · [Screenshots](#-screenshots) · [Quick Start](#-quick-start) · [How It Works](#-how-it-works) · [Project Structure](#-project-structure) · [Troubleshooting](#-troubleshooting)
 
-![Home screen](screenshots/01-home.png)
+</div>
 
-**Chat: streamed answer with a table**
+---
 
-![Chat reply](screenshots/02-chat-recipe.jpeg)
+## ✨ Features
 
-**Chat: the same reply, scrolled down**
+- 💬 **Streaming replies**: tokens appear as the model writes them
+- 🗂️ **Multiple conversations**: start a new chat any time and switch between old ones
+- 💾 **Persistent memory**: chats are saved in SQLite and survive restarts
+- 🌌 **3D interface**: a glass chat panel over a live 3D view of the LangGraph itself. A light pulse travels `START → chat_node → END` while the AI answers
+- 🧪 **Step-by-step Streamlit versions**: learn how the chatbot grows from basic to database-backed
+- ⚡ **Fast inference**: powered by Groq (`openai/gpt-oss-20b`)
 
-![Chat reply scrolled](screenshots/03-chat-recipe-scrolled.png)
+## 📸 Screenshots
 
-## How it works
+### Streamlit UI (`localhost:8501`)
 
-```
-START ──► chat_node ──► END
-             │
-             └─ Groq LLM, state = list of messages
-```
+<table>
+  <tr>
+    <td align="center"><b>Home and saved conversations</b></td>
+  </tr>
+  <tr>
+    <td><img src="screenshots/01-home.png" alt="Home screen with conversation list"></td>
+  </tr>
+</table>
 
-- `ChatState` holds a `messages` list merged with `add_messages`.
-- `chat_node` sends the messages to the LLM and appends the reply.
-- A checkpointer stores each conversation by `thread_id`. `InMemorySaver` loses data on restart; `SqliteSaver` writes to `chatbot.db` so conversations survive.
+<table>
+  <tr>
+    <td align="center"><b>Streamed answer with a table</b></td>
+    <td align="center"><b>Same answer, scrolled</b></td>
+  </tr>
+  <tr>
+    <td><img src="screenshots/02-chat-recipe.jpeg" alt="Chat reply with recipe"></td>
+    <td><img src="screenshots/03-chat-recipe-scrolled.png" alt="Chat reply scrolled down"></td>
+  </tr>
+</table>
 
-## Project structure
+### 3D UI (`localhost:8000`)
 
-| File | Purpose |
-|---|---|
-| `langgraph_backend.py` | Graph with in-memory checkpointer |
-| `langgraph_database_backend.py` | Graph with SQLite checkpointer and `retrieve_all_threads()` |
-| `server.py` | FastAPI server that streams replies to the 3D UI |
-| `static/index.html` | 3D UI (Three.js, single file) |
-| `streamlit_frontend.py` | Basic Streamlit chat |
-| `streamlit_frontend_streaming.py` | Streamlit with token streaming |
-| `streamlit_frontend_threading.py` | Streamlit with multiple threads |
-| `streamlit_frontend_database.py` | Streamlit with threads saved in SQLite |
+<!-- Add your screenshot here:
+![3D UI](screenshots/04-3d-ui.png)
+-->
 
-## Setup
+Run the 3D UI (see [Quick Start](#-quick-start)) and drop a screenshot into `screenshots/`.
+
+## 🚀 Quick Start
+
+**Requirements:** Python 3.10+, a free [Groq API key](https://console.groq.com)
+
+**1. Clone the repo**
 
 ```bash
 git clone https://github.com/osamashabih6960/Build-a-chatbot-Using-Lang-Graph.git
 cd Build-a-chatbot-Using-Lang-Graph
+```
 
+**2. Create a virtual environment**
+
+```bash
 python -m venv .venv
-source .venv/bin/activate        # Windows: .venv\Scripts\activate
 
+# Windows
+.venv\Scripts\activate
+
+# Mac / Linux
+source .venv/bin/activate
+```
+
+**3. Install dependencies**
+
+```bash
 pip install -r requirements.txt
 pip install -r requirements-ui.txt
 ```
 
-Create a `.env` file in the project root:
+**4. Add your API key**
 
-```
+Create a file named `.env` in the project root:
+
+```env
 GROQ_API_KEY=your_groq_key_here
 ```
 
-Get a key at <https://console.groq.com>.
+> ⚠️ Never commit `.env`. Make sure it is listed in `.gitignore`.
 
-## Run the 3D UI
+**5. Run it**
 
-Copy `server.py`, `static/` and `requirements-ui.txt` into the repo root, then:
+| UI | Command | URL |
+|---|---|---|
+| 🌌 3D UI | `uvicorn server:app --reload` | http://localhost:8000 |
+| 🖥️ Streamlit (with SQLite) | `streamlit run streamlit_frontend_database.py` | http://localhost:8501 |
 
-```bash
-uvicorn server:app --reload
+Both can run at the same time in separate terminals. Stop either one with `Ctrl + C`.
+
+## 🧩 How It Works
+
+```mermaid
+flowchart LR
+    A([START]) --> B[chat_node<br/>Groq LLM]
+    B --> C([END])
+    B -.saves state.-> D[(SQLite<br/>chatbot.db)]
 ```
 
-Open <http://localhost:8501/>.
+1. The user's message is added to `ChatState`, a list of messages merged with `add_messages`.
+2. `chat_node` sends the full history to the LLM and appends the reply.
+3. The checkpointer saves the state under a `thread_id`, so each conversation keeps its own memory.
 
-## Run the Streamlit versions
+| Checkpointer | Storage | Survives restart? |
+|---|---|---|
+| `InMemorySaver` | RAM | ❌ No |
+| `SqliteSaver` | `chatbot.db` | ✅ Yes |
 
-```bash
-streamlit run streamlit_frontend_database.py
+### 3D UI architecture
+
+```mermaid
+flowchart LR
+    U[Browser<br/>Three.js UI] -- POST /api/chat --> F[FastAPI<br/>server.py]
+    F --> G[LangGraph<br/>chatbot]
+    G -- token stream --> F
+    F -- Server-Sent Events --> U
 ```
 
-## Notes
+### API endpoints
 
-- `langchain-groq` is imported by the backends but missing from the original `requirements.txt`. `requirements-ui.txt` adds it.
-- The repo commits `myenv/` (a virtual environment). Add it to `.gitignore` and remove it from git with `git rm -r --cached myenv`.
-- The 3D UI loads Three.js from a CDN, so it needs an internet connection the first time.
+| Method | Endpoint | Purpose |
+|---|---|---|
+| `GET` | `/` | Serves the 3D UI |
+| `GET` | `/api/threads` | Lists saved conversations |
+| `GET` | `/api/threads/{id}` | Loads one conversation |
+| `GET` | `/api/new` | Creates a new thread id |
+| `POST` | `/api/chat` | Sends a message, streams the reply |
 
-## Customising the 3D scene
+## 📁 Project Structure
 
-In `static/index.html`, edit the `cols` array for node colours and `pts` for node positions. Add another node to `pts` if you extend the graph with tools.
+```text
+.
+├── langgraph_backend.py              # Graph + in-memory checkpointer
+├── langgraph_database_backend.py     # Graph + SQLite checkpointer
+├── server.py                         # FastAPI server for the 3D UI
+├── static/
+│   └── index.html                    # 3D UI (Three.js, single file)
+├── streamlit_frontend.py             # 1. Basic chat
+├── streamlit_frontend_streaming.py   # 2. + token streaming
+├── streamlit_frontend_threading.py   # 3. + multiple threads
+├── streamlit_frontend_database.py    # 4. + saved in SQLite
+├── screenshots/                      # README images
+├── requirements.txt
+├── requirements-ui.txt
+└── chatbot.db                        # Created automatically
+```
 
-## License
+## 🎨 Customize the 3D Scene
 
-MIT (see `LICENSE`).
+Open `static/index.html` and edit:
+
+- `cols`: node colors
+- `pts`: node positions (add a point to add a node, useful if you extend the graph with tools)
+- the CSS variables at the top (`--teal`, `--pink`, `--bg`) to change the whole theme
+
+## 🛠️ Troubleshooting
+
+| Problem | Fix |
+|---|---|
+| `ModuleNotFoundError: langchain_groq` | Run `pip install -r requirements-ui.txt` with `.venv` active |
+| Groq authentication error | Check `GROQ_API_KEY` in `.env`, then restart the server |
+| 3D background is blank | Three.js loads from a CDN, so check your internet connection |
+| PowerShell blocks `activate` | Run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once |
+| Port already in use | Add `--port 8001` to the `uvicorn` command |
+
+## 🗺️ Roadmap
+
+- [ ] Tool calling (web search, calculator)
+- [ ] Rename and delete conversations
+- [ ] Markdown rendering with syntax highlighting
+- [ ] Docker setup
+
+## 📄 License
+
+Released under the [MIT License](LICENSE).
+
+<div align="center">
+
+Built by **[osamashabih6960](https://github.com/osamashabih6960)** · If this helped you, give it a ⭐
+
+</div>
